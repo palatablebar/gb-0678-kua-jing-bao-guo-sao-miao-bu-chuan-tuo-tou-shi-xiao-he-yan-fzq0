@@ -40,11 +40,32 @@ def create_app():
         p=request.get_json(silent=True) or {}
         if not isinstance(p.get("version"),int): raise DomainError("BAD_VERSION","请提供版本号")
         return store.review(run_id,p["version"],p.get("decision"))
-    @application.get("/api/runs/<run_id>/archive")
-    def archive(run_id):
+    def _publish(run_id,run_version):
         from app.archive import build_archive
         run=store.get(run_id)
-        return application.response_class(build_archive(run),mimetype="text/csv",headers={"Content-Disposition":'attachment; filename="evidence.csv"'})
+        if run["version"]!=run_version: raise DomainError("STALE_VERSION","批次版本已更新，请刷新后再发布",409)
+        evidence=build_archive(run)
+        return store.publish_archive(run_id,run_version,evidence,lambda version,at:build_archive(run,version,at))
+    @application.get("/api/runs/<run_id>/archive")
+    def archive(run_id):
+        run=store.get(run_id)
+        result=_publish(run_id,run["version"])
+        return application.response_class(result["content"],mimetype="text/csv",headers={"Content-Disposition":'attachment; filename="evidence.csv"',"X-Archive-Version":str(result["version"])})
+    @application.post("/api/runs/<run_id>/archive")
+    def publish_archive(run_id):
+        payload=request.get_json(silent=True) or {}
+        if not isinstance(payload.get("version"),int): raise DomainError("BAD_VERSION","请提供批次版本号")
+        result=_publish(run_id,payload["version"])
+        return {"run_id":run_id,"version":result["version"],"state":"published","sha256":result["sha256"],"run_version":result["run_version"],"reused":result["reused"]}
+    @application.get("/api/runs/<run_id>/archives")
+    def archive_versions(run_id):
+        store.get(run_id)
+        return {"run_id":run_id,"versions":store.archive_versions(run_id)}
+    @application.get("/api/runs/<run_id>/archives/<int:version>")
+    def archive_version(run_id,version):
+        store.get(run_id)
+        result=store.archive_content(run_id,version)
+        return application.response_class(result["content"],mimetype="text/csv",headers={"Content-Disposition":f'attachment; filename="evidence-v{version}.csv"',"X-Archive-Version":str(version)})
     for index,(slug,title) in enumerate(MODULES,1):
         module=importlib.import_module(f"app.modules.m{index}_{slug}.handler")
         application.register_blueprint(module.bp)
